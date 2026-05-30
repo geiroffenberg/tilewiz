@@ -10,6 +10,7 @@ const int boardSize = 7;
 const int rackSize = 7;
 const int centerCell = 3; // boardSize ~/ 2
 const int hintLimit = 3;
+const int hintShardThreshold = 3;
 const int gameMoveTimerSeconds = 60;
 const String highScoreKey = 'tilewiz_high_score';
 
@@ -98,6 +99,18 @@ class HintResult {
   final List<PlacedTile> placements;
 }
 
+class TopMoveResult {
+  const TopMoveResult({
+    required this.word,
+    required this.score,
+    required this.placement,
+  });
+
+  final String word;
+  final int score;
+  final PlacedTile placement;
+}
+
 class GameController extends ChangeNotifier {
   GameController({Random? random}) : _random = random ?? Random();
 
@@ -121,9 +134,11 @@ class GameController extends ChangeNotifier {
   int _score = 0;
   int _highScore = 0;
   int _hintsRemaining = hintLimit;
+  int _hintShards = 0;
   String _statusMessage = 'Loading dictionary...';
   List<ScoredWord> _lastScoredWords = const <ScoredWord>[];
   HintResult? _activeHint;
+  TopMoveResult? _lastTopMissedMove;
   String? _lastRejectedWord;
 
   // Consumable sound event.
@@ -143,6 +158,7 @@ class GameController extends ChangeNotifier {
   int get score => _score;
   int get highScore => _highScore;
   int get hintsRemaining => _hintsRemaining;
+  int get hintShards => _hintShards;
   String get statusMessage => _statusMessage;
   List<RackTile> get rack => _rack;
   int? get selectedRackIndex => _selectedRackIndex;
@@ -150,6 +166,7 @@ class GameController extends ChangeNotifier {
   List<List<PlacedTile?>> get board => _board;
   List<ScoredWord> get lastScoredWords => _lastScoredWords;
   HintResult? get activeHint => _activeHint;
+  TopMoveResult? get lastTopMissedMove => _lastTopMissedMove;
   int get countdownRemaining => _countdownRemaining;
   bool get countdownActive => _countdownActive;
   List<(int, int)> get flashCells => _flashCells;
@@ -188,10 +205,12 @@ class GameController extends ChangeNotifier {
     }
     _score = 0;
     _hintsRemaining = hintLimit;
+    _hintShards = 0;
     _pendingPlacements = <PlacedTile>[];
     _selectedRackIndex = null;
     _lastScoredWords = const <ScoredWord>[];
     _activeHint = null;
+    _lastTopMissedMove = null;
     _flashCells = const <(int, int)>[];
     _isGameOver = false;
     _isRunning = true;
@@ -346,6 +365,18 @@ class GameController extends ChangeNotifier {
             '${w.word.toUpperCase()} +${w.totalScore}')
         .join('  •  ');
 
+    if (earned >= 15) {
+      _hintShards++;
+      if (_hintShards >= hintShardThreshold) {
+        _hintShards -= hintShardThreshold;
+        _hintsRemaining++;
+        _statusMessage = '$_statusMessage  •  Skill bonus: +1 Hint';
+      } else {
+        _statusMessage =
+            '$_statusMessage  •  +1 Hint Shard ($_hintShards/$hintShardThreshold)';
+      }
+    }
+
     _pendingPlacements = <PlacedTile>[];
     _activeHint = null;
     _fillRack();
@@ -354,11 +385,7 @@ class GameController extends ChangeNotifier {
     _pendingEvent = GameEvent.points;
 
     // Check end conditions.
-    if (_isBoardFull()) {
-      _endGame('Board full!');
-    } else if (!_canPlayerMove()) {
-      _endGame('No more moves possible.');
-    }
+    _endGameIfNoMovesPossible();
 
     notifyListeners();
   }
@@ -388,6 +415,9 @@ class GameController extends ChangeNotifier {
       _statusMessage =
           'Hint: try "${_activeHint!.word.toUpperCase()}"';
     } else {
+      if (_endGameIfNoMovesPossible()) {
+        return;
+      }
       _statusMessage = 'No hint available.';
     }
     notifyListeners();
@@ -679,6 +709,97 @@ class GameController extends ChangeNotifier {
     return true;
   }
 
+  bool _endGameIfNoMovesPossible() {
+    if (!_isRunning || _isGameOver) return false;
+    if (_isBoardFull()) {
+      _endGame('Board full!');
+      return true;
+    }
+    if (isBoardEmpty) {
+      return false;
+    }
+    if (!_canPlayerMove()) {
+      _endGame('No more words possible.');
+      return true;
+    }
+    return false;
+  }
+
+  TopMoveResult? _findTopPossibleMove() {
+    final List<List<String?>> boardLetters = List<List<String?>>.generate(
+      boardSize,
+      (int r) => List<String?>.generate(
+        boardSize,
+        (int c) => _board[r][c]?.letter.toLowerCase(),
+      ),
+    );
+
+    final List<(int, int)> candidates = <(int, int)>[];
+    for (int r = 0; r < boardSize; r++) {
+      for (int c = 0; c < boardSize; c++) {
+        if (boardLetters[r][c] != null) continue;
+        if (_hasAdjacentFilled(boardLetters, r, c)) {
+          candidates.add((r, c));
+        }
+      }
+    }
+    if (candidates.isEmpty && boardLetters[centerCell][centerCell] == null) {
+      candidates.add((centerCell, centerCell));
+    }
+
+    TopMoveResult? best;
+    final List<PlacedTile> previousPending = List<PlacedTile>.from(_pendingPlacements);
+    final String? previousRejected = _lastRejectedWord;
+
+    for (final (int row, int col) in candidates) {
+      for (int i = 0; i < _rack.length; i++) {
+        final RackTile tile = _rack[i];
+        final List<String> lettersToTry =
+            tile.isBlank ? letterPoints.keys.toList() : <String>[tile.letter];
+
+        for (final String letter in lettersToTry) {
+          _board[row][col] = PlacedTile(
+            letter: letter,
+            points: tile.isBlank ? 0 : tile.points,
+            row: row,
+            column: col,
+            isBlank: tile.isBlank,
+          );
+          _pendingPlacements = <PlacedTile>[_board[row][col]!];
+
+          final List<ScoredWord> words = _findNewWords();
+          if (words.isNotEmpty) {
+            int moveScore = 0;
+            for (final ScoredWord w in words) {
+              moveScore += w.totalScore;
+            }
+
+            if (best == null || moveScore > best.score) {
+              best = TopMoveResult(
+                word: words.first.word,
+                score: moveScore,
+                placement: PlacedTile(
+                  letter: letter,
+                  points: tile.isBlank ? 0 : tile.points,
+                  row: row,
+                  column: col,
+                  isBlank: tile.isBlank,
+                ),
+              );
+            }
+          }
+
+          _board[row][col] = null;
+          _pendingPlacements = <PlacedTile>[];
+        }
+      }
+    }
+
+    _pendingPlacements = previousPending;
+    _lastRejectedWord = previousRejected;
+    return best;
+  }
+
   bool _canPlayerMove() {
     final List<List<String?>> boardLetters = List<List<String?>>.generate(
       boardSize,
@@ -804,10 +925,16 @@ class GameController extends ChangeNotifier {
   }
 
   void _endGame(String reason) {
+    _lastTopMissedMove = _findTopPossibleMove();
     _isGameOver = true;
     _isRunning = false;
     _cancelTimers();
     _statusMessage = '$reason Final score: $_score';
+    if (_lastTopMissedMove != null) {
+      _statusMessage =
+          '$_statusMessage\nTop possible move you missed: '
+          '${_lastTopMissedMove!.word.toUpperCase()} (+${_lastTopMissedMove!.score})';
+    }
     if (_score > _highScore) {
       _highScore = _score;
       unawaited(_preferences?.setInt(highScoreKey, _highScore));

@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import '../config/admob_config.dart';
 import '../game/game_controller.dart';
 import '../game/sound_manager.dart';
+import 'ad_banner.dart';
+import 'interstitial_ad_manager.dart';
 
 class GameScreen extends StatefulWidget {
   const GameScreen({super.key});
@@ -16,6 +19,7 @@ class _GameScreenState extends State<GameScreen>
     with SingleTickerProviderStateMixin {
   late final GameController _controller;
   late final SoundManager _sound;
+  late final InterstitialAdManager _interstitialAds;
   late final AnimationController _flashController;
   List<(int, int)> _activeFlashCells = const <(int, int)>[];
 
@@ -26,6 +30,8 @@ class _GameScreenState extends State<GameScreen>
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     _controller = GameController();
     _sound = SoundManager();
+    _interstitialAds = InterstitialAdManager();
+    _interstitialAds.initialize();
     _initAsync();
     _flashController = AnimationController(
       vsync: this,
@@ -64,6 +70,7 @@ class _GameScreenState extends State<GameScreen>
           _sound.playTick();
         case GameEvent.gameOver:
           _sound.playDrop();
+          _interstitialAds.markGameCompleted();
       }
     }
 
@@ -85,7 +92,13 @@ class _GameScreenState extends State<GameScreen>
     _controller.dispose();
     _flashController.dispose();
     _sound.dispose();
+    _interstitialAds.dispose();
     super.dispose();
+  }
+
+  Future<void> _handlePlayAgain() async {
+    await _interstitialAds.showIfEligible();
+    _controller.startNewGame();
   }
 
   @override
@@ -128,14 +141,14 @@ class _GameScreenState extends State<GameScreen>
                             sound: _sound,
                             flashController: _flashController,
                             activeFlashCells: _activeFlashCells,
+                            onPlayAgainPressed: _handlePlayAgain,
                           ),
                         ),
                       ),
                     ),
                     _RackPanel(controller: _controller, sound: _sound),
                     _ActionBar(controller: _controller, sound: _sound),
-                    // Ad banner slot: add your AdMob widget here later.
-                    const SizedBox(height: 4),
+                    if (AdMobConfig.adsEnabled) const AdBanner(),
                   ],
                 ),
               ),
@@ -206,9 +219,7 @@ class _CountdownBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
-        color: urgent
-            ? const Color(0xEED66A4A)
-            : const Color(0xCC1D6A61),
+        color: urgent ? const Color(0xEED66A4A) : const Color(0xCC1D6A61),
         borderRadius: BorderRadius.circular(10),
         boxShadow: urgent
             ? <BoxShadow>[
@@ -226,9 +237,7 @@ class _CountdownBadge extends StatelessWidget {
           Icon(
             Icons.timer_rounded,
             size: 18,
-            color: urgent
-                ? const Color(0xFFFFF0E0)
-                : const Color(0xCCF0E5D0),
+            color: urgent ? const Color(0xFFFFF0E0) : const Color(0xCCF0E5D0),
           ),
           const SizedBox(width: 4),
           Text(
@@ -312,12 +321,14 @@ class _BoardPanel extends StatelessWidget {
     required this.sound,
     required this.flashController,
     required this.activeFlashCells,
+    required this.onPlayAgainPressed,
   });
 
   final GameController controller;
   final SoundManager sound;
   final AnimationController flashController;
   final List<(int, int)> activeFlashCells;
+  final VoidCallback onPlayAgainPressed;
 
   @override
   Widget build(BuildContext context) {
@@ -374,13 +385,19 @@ class _BoardPanel extends StatelessWidget {
                               child: DecoratedBox(
                                 decoration: BoxDecoration(
                                   color: Color.fromRGBO(
-                                    255, 255, 255, glow * 0.7,
+                                    255,
+                                    255,
+                                    255,
+                                    glow * 0.7,
                                   ),
                                   borderRadius: BorderRadius.circular(8),
                                   boxShadow: <BoxShadow>[
                                     BoxShadow(
                                       color: Color.fromRGBO(
-                                        255, 215, 0, glow * 0.6,
+                                        255,
+                                        215,
+                                        0,
+                                        glow * 0.6,
                                       ),
                                       blurRadius: 16 * glow,
                                       spreadRadius: 4 * glow,
@@ -410,7 +427,7 @@ class _BoardPanel extends StatelessWidget {
                     message: 'Game Over',
                     detail: 'Score: ${controller.score}',
                     actionLabel: 'Play Again',
-                    onPressed: controller.startNewGame,
+                    onPressed: onPlayAgainPressed,
                   ),
               ],
             );
@@ -440,7 +457,10 @@ class _BoardCell extends StatelessWidget {
     final PlacedTile? pending = _findPending();
     final CellMultiplier mult = boardMultipliers[row][col];
     final bool isCenter =
-        row == centerCell && col == centerCell && permanent == null && pending == null;
+        row == centerCell &&
+        col == centerCell &&
+        permanent == null &&
+        pending == null;
     final bool isHintCell = _isHintCell();
 
     return GestureDetector(
@@ -457,16 +477,16 @@ class _BoardCell extends StatelessWidget {
                 isBlank: permanent.isBlank,
               )
             : pending != null
-                ? _PendingLetterFace(
-                    letter: pending.letter,
-                    points: pending.points,
-                    isBlank: pending.isBlank,
-                  )
-                : _EmptyCell(
-                    multiplier: mult,
-                    isCenter: isCenter,
-                    isHint: isHintCell,
-                  ),
+            ? _PendingLetterFace(
+                letter: pending.letter,
+                points: pending.points,
+                isBlank: pending.isBlank,
+              )
+            : _EmptyCell(
+                multiplier: mult,
+                isCenter: isCenter,
+                isHint: isHintCell,
+              ),
       ),
     );
   }
@@ -529,15 +549,15 @@ class _EmptyCell extends StatelessWidget {
                 ),
               )
             : label != null
-                ? Text(
-                    label,
-                    style: GoogleFonts.spaceGrotesk(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      color: const Color(0x66F0E5D0),
-                    ),
-                  )
-                : null,
+            ? Text(
+                label,
+                style: GoogleFonts.spaceGrotesk(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: const Color(0x66F0E5D0),
+                ),
+              )
+            : null,
       ),
     );
   }
@@ -575,7 +595,8 @@ class _RackPanel extends StatelessWidget {
                 width: 48,
                 height: 54,
                 transform: isSelected
-                    ? (Matrix4.identity()..translateByDouble(0.0, -6.0, 0.0, 1.0))
+                    ? (Matrix4.identity()
+                        ..translateByDouble(0.0, -6.0, 0.0, 1.0))
                     : Matrix4.identity(),
                 child: _LetterFace(
                   letter: tile.letter,
@@ -951,9 +972,7 @@ void _showInfoDialog(BuildContext context) {
     builder: (BuildContext context) {
       return Dialog(
         backgroundColor: const Color(0xFF1A3D36),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: Column(
